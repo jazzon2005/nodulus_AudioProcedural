@@ -4,14 +4,23 @@ using UnityEngine;
 public class ProceduralAudioSynth : MonoBehaviour
 {
     private ProceduralAudioSO currentPreset;
-    
-    // Copia local de parámetros para modulación en tiempo real
+
     private float currentFrequency;
     private float currentAmplitude;
     private WaveformType currentWaveform;
     private float[] currentHarmonics = new float[10];
 
-    // ADSR Interno
+    // LFO (FM): x(t) = A sin(2πFt + I sin(2πFm t)), I = ΔF/Fm
+    private bool currentUseLFO;
+    private float currentLfoRate;
+    private float currentLfoIndex;
+
+    // Pitch sweep
+    private float sweepStartMul = 1f;
+    private float sweepTime = 0f;
+    private float sweepElapsed = 0f;
+
+    // ADSR
     private enum AdsrStage { Idle, Attack, Decay, Sustain, Release }
     private AdsrStage stage = AdsrStage.Idle;
     private float envelopeValue = 0f;
@@ -20,38 +29,47 @@ public class ProceduralAudioSynth : MonoBehaviour
     private bool isPlaying = false;
 
     private float sampleRate;
-    private float timeIndex = 0f;
+    private float phase = 0f;     // ciclos acumulados (0..1)
+    private float lfoTime = 0f;   // segundos desde el inicio de la nota
 
     void Awake()
     {
         sampleRate = AudioSettings.outputSampleRate;
     }
 
-    /// <summary>
-    /// Carga los parámetros del Preset y dispara la nota.
-    /// </summary>
-    public void PlayPreset(ProceduralAudioSO preset, float frequencyOverride = -1f)
+    /// <param name="volumeScale">Multiplica la amplitud del preset (usado por la música).</param>
+    /// <param name="sustainMsOverride">Si es >= 0 reemplaza sustainTime (para notas con duración propia).</param>
+    public void PlayPreset(ProceduralAudioSO preset, float frequencyOverride = -1f,
+                           float volumeScale = 1f, float sustainMsOverride = -1f)
     {
         if (preset == null) return;
 
         currentPreset = preset;
         currentFrequency = (frequencyOverride > 0) ? frequencyOverride : preset.baseFrequency;
-        currentAmplitude = preset.amplitude;
+        currentAmplitude = preset.amplitude * volumeScale;
         currentWaveform = preset.waveform;
-        
+
+        currentUseLFO = preset.useLFO;
+        currentLfoRate = preset.lfoRate;
+        currentLfoIndex = preset.LFOIndex;
+
+        sweepStartMul = preset.pitchSweepMultiplier;
+        sweepTime = preset.pitchSweepTime / 1000f;
+        sweepElapsed = 0f;
+
         if (preset.harmonicLevels != null && preset.harmonicLevels.Length == 10)
             System.Array.Copy(preset.harmonicLevels, currentHarmonics, 10);
 
-        // Iniciar ADSR
+        phase = 0f;
+        lfoTime = 0f;
+
         isPlaying = true;
         stage = AdsrStage.Attack;
         envelopeValue = 0f;
-        currentSustainTimer = preset.sustainTime / 1000f;
+        float sustainMs = sustainMsOverride >= 0f ? sustainMsOverride : preset.sustainTime;
+        currentSustainTimer = sustainMs / 1000f;
     }
 
-    /// <summary>
-    /// Modifica la frecuencia en vivo (útil para NodeTransit / rotaciones).
-    /// </summary>
     public void SetLiveFrequency(float freq)
     {
         currentFrequency = freq;
@@ -72,7 +90,6 @@ public class ProceduralAudioSynth : MonoBehaviour
         if (currentPreset == null || (stage == AdsrStage.Idle && !isPlaying))
         {
             for (int i = 0; i < data.Length; i++) data[i] = 0f;
-            timeIndex = 0f;
             return;
         }
 
@@ -80,18 +97,23 @@ public class ProceduralAudioSynth : MonoBehaviour
 
         for (int i = 0; i < data.Length; i += channels)
         {
-            // Generación de onda según forma configurada
-            float sample = GetSample(currentWaveform, currentFrequency, timeIndex);
-            float env = currentPreset.useADSR ? EvaluateAdsr(dt) : 1f;
-
-            sample *= env * currentAmplitude;
-
-            for (int j = 0; j < channels; j++)
+            float sweepMul = 1f;
+            if (sweepTime > 0f && sweepElapsed < sweepTime)
             {
-                data[i + j] = sample;
+                sweepMul = Mathf.Lerp(sweepStartMul, 1f, sweepElapsed / sweepTime);
+                sweepElapsed += dt;
             }
 
-            timeIndex += dt;
+            phase += currentFrequency * sweepMul * dt;
+            phase -= Mathf.Floor(phase);
+
+            float sample = GetSample(currentWaveform, phase);
+            float env = currentPreset.useADSR ? EvaluateAdsr(dt) : 1f;
+            sample *= env * currentAmplitude;
+
+            for (int j = 0; j < channels; j++) data[i + j] = sample;
+
+            lfoTime += dt;
         }
     }
 
@@ -124,20 +146,25 @@ public class ProceduralAudioSynth : MonoBehaviour
         return envelopeValue;
     }
 
-    private float GetSample(WaveformType type, float freq, float t)
+    // cycles = fase en ciclos (F·t acumulado) + término del LFO
+    private float GetSample(WaveformType type, float ph)
     {
+        float cycles = ph;
+        if (currentUseLFO)
+            cycles += currentLfoIndex * Mathf.Sin(2f * Mathf.PI * currentLfoRate * lfoTime) / (2f * Mathf.PI);
+
         switch (type)
         {
-            case WaveformType.Sine: return Mathf.Sin(2f * Mathf.PI * freq * t);
-            case WaveformType.Square: return Mathf.Sign(Mathf.Sin(2f * Mathf.PI * freq * t));
-            case WaveformType.Triangle: return Mathf.PingPong(t * freq * 2f, 1f) * 2f - 1f;
-            case WaveformType.Sawtooth: return 2f * (t * freq - Mathf.Floor(t * freq + 0.5f));
+            case WaveformType.Sine: return Mathf.Sin(2f * Mathf.PI * cycles);
+            case WaveformType.Square: return Mathf.Sign(Mathf.Sin(2f * Mathf.PI * cycles));
+            case WaveformType.Triangle: return Mathf.PingPong(cycles * 2f, 1f) * 2f - 1f;
+            case WaveformType.Sawtooth: return 2f * (cycles - Mathf.Floor(cycles + 0.5f));
             case WaveformType.Additive:
                 float val = 0f;
                 for (int i = 0; i < currentHarmonics.Length; i++)
                 {
                     if (currentHarmonics[i] > 0f)
-                        val += currentHarmonics[i] * Mathf.Sin(2f * Mathf.PI * freq * (i + 1) * t);
+                        val += currentHarmonics[i] * Mathf.Sin(2f * Mathf.PI * (i + 1) * cycles);
                 }
                 return val / 2.5f;
             default: return 0f;

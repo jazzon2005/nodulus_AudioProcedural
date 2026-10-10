@@ -1,13 +1,12 @@
 using UnityEngine;
 
 [CreateAssetMenu(fileName = "NewProceduralAudioPreset", menuName = "Audio/Procedural Audio Preset")]
-
 public class ProceduralAudioSO : ScriptableObject
 {
     [Header("Forma de Onda y Volumen")]
     public WaveformType waveform = WaveformType.Sine;
     [Range(0f, 1f)] public float amplitude = 0.3f;
-    public float baseFrequency = 440f; // Frecuencia nota base en Hz
+    public float baseFrequency = 440f;
 
     [Header("Síntesis Aditiva (10 Armónicos)")]
     public bool useAdditive = false;
@@ -21,8 +20,19 @@ public class ProceduralAudioSO : ScriptableObject
     public float sustainTime = 200f;
     public float release = 100f;
 
+    [Header("Pitch Sweep (boing / caída)")]
+    [Tooltip("Multiplicador de frecuencia al inicio. 1 = sin sweep. >1 cae hacia la nota, <1 sube hacia la nota")]
+    public float pitchSweepMultiplier = 1f;
+    [Tooltip("Duración del sweep en ms")]
+    public float pitchSweepTime = 0f;
+
+    [Header("LFO / Vibrato (FM)")]
+    public bool useLFO = false;
+    [Range(0f, 10f)] public float lfoRate = 5f;   // FV: Fm en Hz
+    public float lfoDepthHz = 10f;                 // Vamp: ΔF en Hz
+    public float LFOIndex => lfoRate > 0.0001f ? lfoDepthHz / lfoRate : 0f; // I = ΔF / Fm
+
     [Header("Efectos Dinámicos de Gameplay")]
-    [Tooltip("Permite modular el pitch dinámicamente según la velocidad/progreso de la animación")]
     public bool enablePitchModulation = false;
     public float minFrequencyMultiplier = 0.8f;
     public float maxFrequencyMultiplier = 1.5f;
